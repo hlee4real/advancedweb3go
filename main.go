@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -48,38 +49,46 @@ func main() {
 		return
 	}
 	collection = mongoclient.Database("wheelV2").Collection("events")
+	// go tracking()
+	// sigs := make(chan os.Signal, 1)
+	// signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	// done := make(chan bool, 1)
+	// go func() {
+	// 	sig := <-sigs
+	// 	fmt.Println()
+	// 	fmt.Println(sig)
+	// 	done <- true
+	// }()
+	// fmt.Println("awaiting signal")
+	// <-done
+	// fmt.Println("exiting")
+	router := gin.Default()
+	router.GET("/events/:address", totalAmountCount())
+	router.GET("/events", getAll())
+	router.GET("/getprize/:address", getAllPrize())
+	router.GET("/amount", getAmount())
+	router.GET("/address", totalAddress())
+	router.Run()
+
+}
+func tracking() {
+	mongoclient, err := mongo.Connect(context.TODO(), options.Client().ApplyURI("mongodb://localhost:27017"))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	collection = mongoclient.Database("wheelV2").Collection("events")
 	client, err := ethclient.Dial("https://bsc-mainnet.nodereal.io/v1/9f0529d15c8c42d998eea5ecfe012662")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	contractAddress := common.HexToAddress("0x7E2E8B536017584ecC660deF55f235933049392d")
+	contractAddress := common.HexToAddress("0x0DF49Ee109bE77DA53d3050575e409D28D542ECC")
 	// number := 22460675
 	// number := 22460588
-	fromBlock := big.NewInt(20977112)
-	toBlock := fromBlock.Sub(fromBlock, big.NewInt(1))
-	// const blockDuration :=
-	// for {
-	// 	fromBlock := fromBlock.Add(toBlock, big.NewInt(1))
-	// 	toBlock = toBlock.Add(toBlock, big.NewInt(1000))
-	// }
-	query := ethereum.FilterQuery{
-		FromBlock: fromBlock,
-		ToBlock:   toBlock,
-		Addresses: []common.Address{
-			contractAddress,
-		},
-	}
-	logs, err := client.FilterLogs(context.Background(), query)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	logRequestCreatedSig := []byte("RequestCreated(address,uint256,uint256)")
-	logRequestCreatedSigHash := crypto.Keccak256Hash(logRequestCreatedSig).Hex()
-	logResponseCreatedSig := []byte("ResponseCreated(address,uint256,uint256[])")
-	logResponseCreatedSigHash := crypto.Keccak256Hash(logResponseCreatedSig).Hex()
-	// xxxx this moment
+	fromBlock := 20977112
+	toBlock := fromBlock - 1
+	const blockDuration = 3000
 	collection.Indexes().CreateOne(context.Background(), mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "txHash", Value: 1},
@@ -87,86 +96,83 @@ func main() {
 		},
 		Options: options.Index().SetUnique(true),
 	})
-
-	for _, vLog := range logs {
-		if len(vLog.Topics) > 0 && vLog.Topics[0].Hex() == logRequestCreatedSigHash {
-			var requestCreated LogRequestCreated
-			requestCreated.User = common.HexToAddress(vLog.Topics[1].Hex())
-			requestCreated.RequestId = big.NewInt(0).SetBytes(vLog.Topics[2].Bytes())
-			requestCreated.Amount = big.NewInt(0).SetBytes(vLog.Data)
-			requestCreated.TxHash = vLog.TxHash
-			// fmt.Println("-----REQUEST-----")
-			// fmt.Printf("User: %s, Req ID: %d, Amount: %d, TxHash: %s, Index: %d \n", requestCreated.User, requestCreated.RequestId, requestCreated.Amount, requestCreated.TxHash.Hex(), vLog.Index)
-			collection.InsertOne(context.Background(), bson.D{
-				{Key: "txHash", Value: requestCreated.TxHash.Hex()},
-				{Key: "index", Value: vLog.Index},
-				{Key: "type", Value: "request"},
-				{Key: "requestID", Value: requestCreated.RequestId.Int64()},
-				{Key: "user", Value: strings.ToLower(requestCreated.User.Hex())},
-				{Key: "amount", Value: requestCreated.Amount.Int64()},
-			})
-		} else if len(vLog.Topics) > 0 && vLog.Topics[0].Hex() == logResponseCreatedSigHash {
-			var responseCreated LogResponseCreated
-			responseCreated.User = common.HexToAddress(vLog.Topics[1].Hex())
-			responseCreated.RequestId = big.NewInt(0).SetBytes(vLog.Topics[2].Bytes())
-			responseCreated.PrizeId = make([]*big.Int, 0)
-			responseCreated.TxHash = vLog.TxHash
-			//prizeID is like: 0 1 2
-			//use loop to get all prizeID
-			for i := 0; i < len(vLog.Data); i += 32 {
-				responseCreated.PrizeId = append(responseCreated.PrizeId, big.NewInt(0).SetBytes(vLog.Data[i:i+32]))
-			}
-			if len(responseCreated.PrizeId) > 1 {
-				responseCreated.PrizeId = responseCreated.PrizeId[2:]
-			}
-			//convert prizeid to int64
-			prizeIdInt64 := make([]int64, 0)
-			for _, v := range responseCreated.PrizeId {
-				prizeIdInt64 = append(prizeIdInt64, v.Int64())
-			}
-			// fmt.Println("-----RESPONSE-----")
-			// fmt.Printf("User: %s, Req ID: %d, Prize: %v, TxHash: %s, Index: %d \n", responseCreated.User, responseCreated.RequestId, responseCreated.PrizeId, responseCreated.TxHash.Hex(), vLog.Index)
-			collection.InsertOne(context.Background(), bson.D{
-				{Key: "txHash", Value: responseCreated.TxHash.Hex()},
-				{Key: "index", Value: vLog.Index},
-				{Key: "type", Value: "response"},
-				{Key: "requestID", Value: responseCreated.RequestId.Int64()},
-				{Key: "user", Value: strings.ToLower(responseCreated.User.Hex())},
-				{Key: "prize", Value: prizeIdInt64},
-			})
+	for {
+		fromBlock = toBlock + 1
+		toBlock = 21343508
+		if fromBlock+blockDuration < toBlock {
+			toBlock = fromBlock + blockDuration
 		}
-	}
-	router := gin.Default()
-	router.GET("/events/:address", totalAmountCount())
-	router.GET("/events", getAll())
-	router.GET("/getprize/:address", getAllPrize())
-	router.Run()
-}
-func totalAmountCount() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// get total amount by each user address
-		var events []bson.M
-		var totalAmount int64
-		results, err := collection.Find(context.Background(), bson.M{})
+		fmt.Printf("Filter logs from %d to %d\n", fromBlock, toBlock)
+		query := ethereum.FilterQuery{
+			FromBlock: big.NewInt(int64(fromBlock)),
+			ToBlock:   big.NewInt(int64(toBlock)),
+			Addresses: []common.Address{
+				contractAddress,
+			},
+		}
+
+		logs, err := client.FilterLogs(context.Background(), query)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, APIResponse{Message: "Error", Code: 1, Data: nil})
+			fmt.Println(err)
 			return
 		}
-		for results.Next(context.Background()) {
-			var event bson.M
-			err := results.Decode(&event)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, APIResponse{Message: "Error", Code: 1, Data: nil})
-				return
+		logRequestCreatedSig := []byte("RequestCreated(address,uint256,uint256)")
+		logRequestCreatedSigHash := crypto.Keccak256Hash(logRequestCreatedSig).Hex()
+		logResponseCreatedSig := []byte("ResponseCreated(address,uint256,uint256[])")
+		logResponseCreatedSigHash := crypto.Keccak256Hash(logResponseCreatedSig).Hex()
+		// xxxx this moment
+
+		for _, vLog := range logs {
+			if len(vLog.Topics) > 0 && vLog.Topics[0].Hex() == logRequestCreatedSigHash {
+				var requestCreated LogRequestCreated
+				requestCreated.User = common.HexToAddress(vLog.Topics[1].Hex())
+				requestCreated.RequestId = big.NewInt(0).SetBytes(vLog.Topics[2].Bytes())
+				requestCreated.Amount = big.NewInt(0).SetBytes(vLog.Data)
+				requestCreated.TxHash = vLog.TxHash
+				// fmt.Println("-----REQUEST-----")
+				// fmt.Printf("User: %s, Req ID: %d, Amount: %d, TxHash: %s, Index: %d \n", requestCreated.User, requestCreated.RequestId, requestCreated.Amount, requestCreated.TxHash.Hex(), vLog.Index)
+				collection.InsertOne(context.Background(), bson.D{
+					{Key: "txHash", Value: requestCreated.TxHash.Hex()},
+					{Key: "index", Value: vLog.Index},
+					{Key: "type", Value: "request"},
+					{Key: "requestID", Value: requestCreated.RequestId.Int64()},
+					{Key: "user", Value: strings.ToLower(requestCreated.User.Hex())},
+					{Key: "amount", Value: requestCreated.Amount.Int64()},
+				})
+			} else if len(vLog.Topics) > 0 && vLog.Topics[0].Hex() == logResponseCreatedSigHash {
+				var responseCreated LogResponseCreated
+				responseCreated.User = common.HexToAddress(vLog.Topics[1].Hex())
+				responseCreated.RequestId = big.NewInt(0).SetBytes(vLog.Topics[2].Bytes())
+				responseCreated.PrizeId = make([]*big.Int, 0)
+				responseCreated.TxHash = vLog.TxHash
+				//prizeID is like: 0 1 2
+				//use loop to get all prizeID
+				for i := 0; i < len(vLog.Data); i += 32 {
+					responseCreated.PrizeId = append(responseCreated.PrizeId, big.NewInt(0).SetBytes(vLog.Data[i:i+32]))
+				}
+				if len(responseCreated.PrizeId) > 1 {
+					responseCreated.PrizeId = responseCreated.PrizeId[2:]
+				}
+				//convert prizeid to int64
+				prizeIdInt64 := make([]int64, 0)
+				for _, v := range responseCreated.PrizeId {
+					prizeIdInt64 = append(prizeIdInt64, v.Int64())
+				}
+				// fmt.Println("-----RESPONSE-----")
+				// fmt.Printf("User: %s, Req ID: %d, Prize: %v, TxHash: %s, Index: %d \n", responseCreated.User, responseCreated.RequestId, responseCreated.PrizeId, responseCreated.TxHash.Hex(), vLog.Index)
+				collection.InsertOne(context.Background(), bson.D{
+					{Key: "txHash", Value: responseCreated.TxHash.Hex()},
+					{Key: "index", Value: vLog.Index},
+					{Key: "type", Value: "response"},
+					{Key: "requestID", Value: responseCreated.RequestId.Int64()},
+					{Key: "user", Value: strings.ToLower(responseCreated.User.Hex())},
+					{Key: "prize", Value: prizeIdInt64},
+				})
 			}
-			events = append(events, event)
 		}
-		for _, event := range events {
-			if event["user"] == strings.ToLower(c.Param("address")) && event["type"] == "request" {
-				totalAmount += event["amount"].(int64)
-			}
+		if toBlock-fromBlock < 100 {
+			time.Sleep(time.Second * 20)
 		}
-		c.JSON(http.StatusOK, APIResponse{Message: "Success", Code: 0, Data: totalAmount})
 	}
 }
 
@@ -265,5 +271,70 @@ func getAll() gin.HandlerFunc {
 			events = append(events, event)
 		}
 		c.JSON(http.StatusOK, APIResponse{Message: "Success", Code: 0, Data: events})
+	}
+}
+func getAmount() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var events []bson.M
+		var totalAmount int64
+		results, err := collection.Find(context.Background(), bson.M{})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Message: "Error", Code: 1, Data: nil})
+			return
+		}
+		for results.Next(context.Background()) {
+			var event bson.M
+			err := results.Decode(&event)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, APIResponse{Message: "Error", Code: 1, Data: nil})
+				return
+			}
+			events = append(events, event)
+		}
+		for _, event := range events {
+			if event["type"] == "request" {
+				totalAmount += event["amount"].(int64)
+			}
+		}
+		message := fmt.Sprintf("Total amount: %d", totalAmount)
+		c.JSON(http.StatusOK, APIResponse{Message: "Success", Code: 0, Data: message})
+	}
+}
+func totalAmountCount() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// get total amount by each user address
+		var events []bson.M
+		var totalAmount int64
+		results, err := collection.Find(context.Background(), bson.M{})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Message: "Error", Code: 1, Data: nil})
+			return
+		}
+		for results.Next(context.Background()) {
+			var event bson.M
+			err := results.Decode(&event)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, APIResponse{Message: "Error", Code: 1, Data: nil})
+				return
+			}
+			events = append(events, event)
+		}
+		for _, event := range events {
+			if event["user"] == strings.ToLower(c.Param("address")) && event["type"] == "request" {
+				totalAmount += event["amount"].(int64)
+			}
+		}
+		c.JSON(http.StatusOK, APIResponse{Message: "Success", Code: 0, Data: totalAmount})
+	}
+}
+func totalAddress() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		results, err := collection.Distinct(context.Background(), "user", bson.M{})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, APIResponse{Message: "Error", Code: 1, Data: nil})
+			return
+		}
+		message := fmt.Sprintf("Total users: %d", len(results))
+		c.JSON(http.StatusOK, APIResponse{Message: "Success", Code: 0, Data: message})
 	}
 }
